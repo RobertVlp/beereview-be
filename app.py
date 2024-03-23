@@ -5,7 +5,7 @@ import json
 from os import path
 from openai import OpenAI
 import os
-from flask import Response
+from bson.objectid import ObjectId
 
 app = Flask(__name__)
 base_dir = path.dirname(path.abspath(__file__))
@@ -49,18 +49,20 @@ class user_schema:
         )
     
 class review_schema:
-    def __init__(self, beer_id, rating, review, tastes):
+    def __init__(self, beer_id, rating, review, tastes, user_id):
         self.beer_id = beer_id
         self.rating = rating
         self.review = review
         self.tastes = tastes
+        self.user_id = user_id
 
     def to_json(self):
         return {
             'beer_id': self.beer_id,
             'rating': self.rating,
             'review': self.review,
-            'tastes': self.tastes
+            'tastes': self.tastes,
+            'user_id': self.user_id
         }
 
     @staticmethod
@@ -69,7 +71,8 @@ class review_schema:
             json['beer_id'],
             json['rating'],
             json['review'],
-            json['tastes']
+            json['tastes'],
+            json['user_id']
         )
     
     
@@ -81,7 +84,7 @@ def hash_password(password):
 @app.before_first_request
 def before_first_request():
     if not users_collection.find_one({'username': 'admin'}):
-        users_collection.insert_one({'username': 'admin', 'password': hash_password('admin'), 'fav_beers': []})
+        users_collection.insert_one({'username': 'admin', 'password': hash_password('admin'), 'fav_beers': [], 'reviews': []})
     
     if not beers_collection.find_one():
         add_beers()
@@ -267,6 +270,17 @@ def get_chatbot():
     return jsonify(response)
 
 
+@app.route('/reviews/beer/<int:beer_id>', methods=['GET'])
+def get_beer_reviews(beer_id):
+    beer_id = str(beer_id)
+    if not beers_collection.find_one({'id': beer_id}):
+        return jsonify({'message': 'Beer not found'}), 404
+    reviews = reviews_collection.find({'beer_id': beer_id})
+    reviews = [{**review, 'user': users_collection.find_one({'_id': review['user_id']}, {'_id': 0})['username']} for review in reviews]
+    reviews = [{**review, '_id': str(review['_id']), 'user_id': str(review['user_id'])} for review in reviews]
+    return jsonify(list(reviews))
+
+
 @app.route('/reviews', methods=['POST'])
 @jwt_required()
 def add_review():
@@ -280,30 +294,53 @@ def add_review():
     rating = data['rating']
     review = data['review']
     tastes = data['tastes']
+    user_id = users_collection.find_one({'username': current_user})['_id']
 
     if not beers_collection.find_one({'id': str(beer_id)}):
         return jsonify({'message': 'Beer not found'}), 404
 
     user = users_collection.find_one({'username': current_user})
-    review_id = reviews_collection.insert_one(review_schema(beer_id, rating, review, tastes).to_json()).inserted_id
-    user['reviews'].append(str(review_id))
+    if any(review_id for review_id in user['reviews'] if reviews_collection.find_one({'_id': review_id, 'beer_id': beer_id})):
+        return jsonify({'message': 'You have already reviewed this beer'}), 400
+    
+    review_id = reviews_collection.insert_one(review_schema(beer_id, rating, review, tastes, user_id).to_json()).inserted_id
+    user['reviews'].append(review_id)
     
     users_collection.update_one({'username': current_user}, {'$set': {'reviews': user['reviews']}})
                                 
     return jsonify({'message': 'Review added successfully'}), 201
 
-@app.route('/reviews', methods=['GET'])
-def get_reviews():
-    query = {}
-    for key, value in request.args.items():
-        query[key] = value
-        
-    reviews = reviews_collection.find(query, {'_id': 0})
-    reviews = [{**review, 'beer': beers_collection.find_one({'id': str(review['beer_id'])}, {'_id': 0})} for review in reviews]
-    
-    return jsonify(reviews)
 
-        
+@app.route('/reviews', methods=['GET'])
+@jwt_required()
+def get_reviews():
+    current_user = get_jwt_identity()
+    user = users_collection.find_one({'username': current_user})
+    reviews = reviews_collection.find({'_id': {'$in': user['reviews']}})
+    reviews = [{**review, 'user': users_collection.find_one({'_id': review['user_id']}, {'_id': 0})['username']} for review in reviews]
+    reviews = [{**review, '_id': str(review['_id']), 'user_id': str(review['user_id'])} for review in reviews]
+    reviews = [{**review, 'beer': beers_collection.find_one({'id': review['beer_id']}, {'_id': 0})} for review in reviews]
+    return jsonify(list(reviews))
+    
+@app.route('/reviews/<string:review_id>', methods=['DELETE'])
+@jwt_required()
+def delete_review(review_id):
+    current_user = get_jwt_identity()
+    user = users_collection.find_one({'username': current_user})
+    review = reviews_collection.find_one({'_id': ObjectId(review_id)})
+    
+    if not review:
+        return jsonify({'message': 'Review not found'}), 404
+    
+    if review['user_id'] != user['_id']:
+        return jsonify({'message': 'You are not authorized to delete this review'}), 403
+    
+    reviews_collection.delete_one({'_id': ObjectId(review_id)})
+    user['reviews'].remove(ObjectId(review_id))
+    users_collection.update_one({'username': current_user}, {'$set': {'reviews': user['reviews']}})
+    
+    return jsonify({'message': 'Review deleted successfully'}), 200
+    
 
 def add_beers():
     with open('beers.json', 'r', encoding='utf-8') as beers_file:
