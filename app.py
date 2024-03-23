@@ -3,6 +3,9 @@ from flask_jwt_extended import JWTManager, create_access_token, jwt_required, ge
 from pymongo import MongoClient
 import json
 from os import path
+from openai import OpenAI
+import os
+from flask import Response
 
 app = Flask(__name__)
 base_dir = path.dirname(path.abspath(__file__))
@@ -46,6 +49,7 @@ def hash_password(password):
     hashed_password = password
     return hashed_password
 
+
 @app.before_first_request
 def before_first_request():
     if not users_collection.find_one({'username': 'admin'}):
@@ -56,6 +60,7 @@ def before_first_request():
         
     if not breweries_collection.find_one():
         add_breweries()
+
 
 @app.route('/register', methods=['POST'])
 def register():
@@ -70,6 +75,7 @@ def register():
     users_collection.insert_one(user_schema(data['username'], hash_password(data['password']), []).to_json())
 
     return jsonify({'message': 'User created successfully'}), 201
+
 
 @app.route('/login', methods=['POST'])
 def login():
@@ -88,6 +94,7 @@ def login():
 
     access_token = create_access_token(identity=username, expires_delta=False)
     return jsonify({'access_token': access_token})
+
 
 @app.route('/protected', methods=['GET'])
 @jwt_required()
@@ -114,6 +121,7 @@ def get_categories():
     categories = [{category: beers_collection.distinct('style_name', {'cat_name': category})} for category in categories]
     return jsonify(categories)
 
+
 @app.route('/favourites', methods=['POST'])
 @jwt_required()
 def add_favourite():
@@ -138,6 +146,7 @@ def add_favourite():
 
     return jsonify({'message': 'Beer added to favourites'}), 201
 
+
 @app.route('/favourites', methods=['GET'])
 @jwt_required()
 def get_favourites():
@@ -149,6 +158,27 @@ def get_favourites():
     return jsonify(list(fav_beers))
 
 
+@app.route('/favourites', methods=['DELETE'])
+@jwt_required()
+def delete_favourite():
+    current_user = get_jwt_identity()
+    data = request.get_json()
+
+    if not data or not data.get('beer_id'):
+        return jsonify({'message': 'Missing beer_id'}), 400
+
+    beer_id = str(data['beer_id'])
+    user = users_collection.find_one({'username': current_user})
+
+    if beer_id not in user['fav_beers']:
+        return jsonify({'message': 'Beer not in favourites'}), 400
+
+    user['fav_beers'].remove(beer_id)
+    users_collection.update_one({'username': current_user}, {'$set': {'fav_beers': user['fav_beers']}})
+
+    return jsonify({'message': 'Beer removed from favourites'}), 200
+
+
 @app.route('/breweries', methods=['GET'])
 def get_breweries():
     query = {}
@@ -158,10 +188,56 @@ def get_breweries():
     breweries = breweries_collection.find(query, {'_id': 0})
     return jsonify(list(breweries))
 
+
 @app.route('/breweries/<int:brewery_id>', methods=['GET'])
 def get_brewery(brewery_id):
     brewery = breweries_collection.find_one({'id': str(brewery_id)}, {'_id': 0})
     return jsonify(brewery)
+
+
+@app.route('/recommendations', methods=['GET'])
+@jwt_required()
+def get_recommendations():
+    current_user = get_jwt_identity()
+    user = users_collection.find_one({'username': current_user})
+    fav_beers = beers_collection.find({'id': {'$in': user['fav_beers']}}, {'_id': 0})
+    fav_beers = [beer['style_name'] for beer in fav_beers]
+
+    page = int(request.args.get('page', 1))
+    per_page = int(request.args.get('per_page', 10))
+    skip = (page - 1) * per_page
+
+    recommendations = beers_collection.find({'style_name': {'$in': fav_beers}}, {'_id': 0}).skip(skip).limit(per_page)
+    recommendations = [{**beer, 'brewery': breweries_collection.find_one({'id': str(beer['brewery_id'])}, {'_id': 0})} for beer in recommendations]
+
+    return jsonify(list(recommendations))
+
+
+@app.route('/chatbot', methods=['GET'])
+@jwt_required()
+def get_chatbot():
+    current_user = get_jwt_identity()
+    user = users_collection.find_one({'username': current_user})
+    fav_beers = beers_collection.find({'id': {'$in': user['fav_beers']}}, {'_id': 0})
+    fav_beers = [beer['style_name'] for beer in fav_beers]
+    fav_beers = ', '.join(fav_beers)
+
+    client = OpenAI(
+        api_key=os.getenv('OPENAI_API_KEY'),
+    )
+    
+    completion = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant that is very knowledgeable in specialty beers."},
+            {"role": "user", "content": f"I like {fav_beers} beers. What would you recommend me?"},
+        ]
+    )
+    response = {
+        'response': completion.choices[0].message.content
+    }
+    return jsonify(response)
+        
 
 def add_beers():
     with open('beers.json', 'r', encoding='utf-8') as beers_file:
@@ -175,5 +251,3 @@ def add_breweries():
 
 if __name__ == '__main__':
     app.run(debug=True)
-    
-    
