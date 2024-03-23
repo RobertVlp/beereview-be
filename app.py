@@ -21,19 +21,22 @@ db = client[app.config['MONGODB_SETTINGS']['host'].split('/')[-1]]
 users_collection = db['users']
 beers_collection = db['beers']
 breweries_collection = db['breweries']
+reviews_collection = db['reviews']
 
 
 class user_schema:
-    def __init__(self, username, password, fav_beers):
+    def __init__(self, username, password, fav_beers=[], reviews=[]):
         self.username = username
         self.password = password
         self.fav_beers = fav_beers
+        self.reviews = reviews
 
     def to_json(self):
         return {
             'username': self.username,
             'password': self.password,
-            'fav_beers': self.fav_beers
+            'fav_beers': self.fav_beers,
+            'reviews': self.reviews
         }
 
     @staticmethod
@@ -41,10 +44,35 @@ class user_schema:
         return user_schema(
             json['username'],
             json['password'],
-            json['fav_beers']
+            json['fav_beers'],
+            json['reviews']
         )
+    
+class review_schema:
+    def __init__(self, beer_id, rating, review, tastes):
+        self.beer_id = beer_id
+        self.rating = rating
+        self.review = review
+        self.tastes = tastes
 
+    def to_json(self):
+        return {
+            'beer_id': self.beer_id,
+            'rating': self.rating,
+            'review': self.review,
+            'tastes': self.tastes
+        }
 
+    @staticmethod
+    def from_json(json):
+        return review_schema(
+            json['beer_id'],
+            json['rating'],
+            json['review'],
+            json['tastes']
+        )
+    
+    
 def hash_password(password):
     hashed_password = password
     return hashed_password
@@ -237,6 +265,44 @@ def get_chatbot():
         'response': completion.choices[0].message.content
     }
     return jsonify(response)
+
+
+@app.route('/reviews', methods=['POST'])
+@jwt_required()
+def add_review():
+    current_user = get_jwt_identity()
+    data = request.get_json()
+
+    if not data or not data.get('beer_id') or not data.get('rating') or not data.get('review') or not data.get('tastes'):
+        return jsonify({'message': 'Missing required fields'}), 400
+
+    beer_id = data['beer_id']
+    rating = data['rating']
+    review = data['review']
+    tastes = data['tastes']
+
+    if not beers_collection.find_one({'id': str(beer_id)}):
+        return jsonify({'message': 'Beer not found'}), 404
+
+    user = users_collection.find_one({'username': current_user})
+    review_id = reviews_collection.insert_one(review_schema(beer_id, rating, review, tastes).to_json()).inserted_id
+    user['reviews'].append(str(review_id))
+    
+    users_collection.update_one({'username': current_user}, {'$set': {'reviews': user['reviews']}})
+                                
+    return jsonify({'message': 'Review added successfully'}), 201
+
+@app.route('/reviews', methods=['GET'])
+def get_reviews():
+    query = {}
+    for key, value in request.args.items():
+        query[key] = value
+        
+    reviews = reviews_collection.find(query, {'_id': 0})
+    reviews = [{**review, 'beer': beers_collection.find_one({'id': str(review['beer_id'])}, {'_id': 0})} for review in reviews]
+    
+    return jsonify(reviews)
+
         
 
 def add_beers():
