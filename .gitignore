@@ -1,0 +1,10 @@
+# Virtual environment
+venv/
+
+# Byte-compiled / optimized files
+__pycache__/
+
+# Optional: Ignore additional files/directories based on your project needs
+*.pyc  # Compiled Python files
+*.log  # Log files (if not relevant to version control)
+*.env  # Environment variable files (for security)
