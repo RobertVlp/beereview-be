@@ -1,0 +1,6 @@
+{
+  "MONGODB_SETTINGS": {
+    "host": "mongodb://localhost:27017/beereview"
+  },
+  "JWT_SECRET_KEY": "your_secret_key"
+}
