@@ -6,8 +6,12 @@ from os import path
 from openai import OpenAI
 import os
 from bson.objectid import ObjectId
+from flask_cors import CORS
 
 app = Flask(__name__)
+
+CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}})
+
 base_dir = path.dirname(path.abspath(__file__))
 config_file_path = path.join(base_dir, 'config.json')
 
